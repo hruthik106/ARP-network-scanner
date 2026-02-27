@@ -1,44 +1,113 @@
 import scapy.all as sc
-import optparse
+import argparse
+import csv
+import sys
+import requests
 
+#argument parser 
 def get_arguments():
-    parser = optparse.OptionParser()
-    parser.add_option("-t", "--target", dest="target",help="Target IP / IP range (e.g., 192.168.1.0/24)")
-    
-    (options, arguments) = parser.parse_args()
+    parser = argparse.ArgumentParser(
+        description="ARP Network Scanner"
+    )
+    parser.add_argument(
+        "-t", "--target",
+        dest="target",
+        required=True,
+        help="Target IP / IP range (e.g., 192.168.1.0/24)"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        dest="output",
+        help="Save results to CSV file"
+    )
+    return parser.parse_args()
 
-    if not options.target:
-        parser.error("[-] Please specify a target. Use --help for more info.")
 
-    return options
+#vendor lookup
+def get_vendor(mac):
+    try:
+        url = f"https://api.macvendors.com/{mac}"
+        response = requests.get(url, timeout=3)
+
+        if response.status_code == 200:
+            return response.text
+        else:
+            return "Unknown"
+    except requests.RequestException:
+        return "Unknown"
 
 
+# scanner 
 def scan(ip_range):
-    arp_req = sc.ARP(pdst=ip_range)
-    broadcast = sc.Ether(dst="ff:ff:ff:ff:ff:ff")
-    arp_req_broadcast = broadcast / arp_req
+    try:
+        arp_req = sc.ARP(pdst=ip_range)
+        broadcast = sc.Ether(dst="ff:ff:ff:ff:ff:ff")
+        arp_req_broadcast = broadcast / arp_req
 
-    ans_list = sc.srp(arp_req_broadcast, timeout=1, verbose=False)[0]
+        answered = sc.srp(
+            arp_req_broadcast,
+            timeout=2,
+            verbose=False
+        )[0]
 
-    client_list = []
-    for sent, received in ans_list:
-        client_list.append({
-            "ip": received.psrc,
-            "mac": received.hwsrc
-        })
+        clients = []
 
-    return client_list
+        for sent, received in answered:
+            vendor = get_vendor(received.hwsrc)
+
+            clients.append({
+                "ip": received.psrc,
+                "mac": received.hwsrc,
+                "vendor": vendor
+            })
+
+        return clients
+
+    except PermissionError:
+        print("[-] Run this script with sudo/root privileges.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"[-] Scan error: {e}")
+        sys.exit(1)
 
 
+#print results ----------------------
 def print_result(results):
-    print("IP Address\t\tMAC Address")
-    print("-" * 40)
+    print("\nIP Address\t\tMAC Address\t\tVendor")
+    print("-" * 70)
+
     for client in results:
-        print(f"{client['ip']}\t\t{client['mac']}")
-    print("-" * 40)
+        print(f"{client['ip']}\t{client['mac']}\t{client['vendor']}")
+
+    print("-" * 70)
+    print(f"[+] Hosts discovered: {len(results)}")
 
 
+#save to CSV 
+def save_to_csv(results, filename):
+    try:
+        with open(filename, "w", newline="") as csvfile:
+            writer = csv.DictWriter(
+                csvfile,
+                fieldnames=["ip", "mac", "vendor"]
+            )
+            writer.writeheader()
+            writer.writerows(results)
+
+        print(f"[+] Results saved to {filename}")
+
+    except Exception as e:
+        print(f"[-] Failed to save CSV: {e}")
+
+
+# main
 if __name__ == "__main__":
     options = get_arguments()
+
+    print("[*] Scanning network...")
     scan_result = scan(options.target)
+
     print_result(scan_result)
+
+    if options.output:
+        save_to_csv(scan_result, options.output)
